@@ -1,0 +1,13 @@
+# Exclude binaries, caches, and local deploy helpers
+cloudflared.exe
+__pycache__/
+*.pyc
+.env
+scratch/
+patch_*.py
+update_*.py
+test_*.js
+check_*.py
+check_*.js
+deploy_dhruv.py
+.system_generated/

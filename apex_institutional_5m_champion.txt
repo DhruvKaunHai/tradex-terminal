@@ -1,0 +1,323 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © NSE Quant Studio — Champion Strategy #1: Apex MTF Confluence & Volatility Expansion v3 (5m Master)
+
+//@version=5
+strategy("Apex MTF Confluence & Volatility Expansion v3 [5m Master]", 
+         shorttitle="Apex MTF v3 [5m]", 
+         overlay=true, 
+         initial_capital=500000, 
+         default_qty_type=strategy.fixed, 
+         default_qty_value=75, 
+         currency=currency.INR, 
+         commission_type=strategy.commission.cash_per_order, 
+         commission_value=0.0, 
+         calc_on_every_tick=false, 
+         process_orders_on_close=true, 
+         max_labels_count=500, 
+         max_lines_count=500)
+
+// ============================================================================
+// 1. STRATEGY INPUTS & ARCHITECTURE
+// ============================================================================
+grp_st       = "1. 5m Supertrend Core Engine"
+stPeriod     = input.int(10, "Supertrend ATR Length", minval=1, group=grp_st)
+stMult       = input.float(3.5, "Supertrend Multiplier", minval=0.5, step=0.1, group=grp_st)
+
+grp_ema      = "2. Intraday & Macro Trend Ribbon"
+emaFastP     = input.int(9, "Fast EMA Length", minval=1, group=grp_ema)
+emaSlowP     = input.int(21, "Slow EMA Length", minval=1, group=grp_ema)
+emaMacroP    = input.int(50, "Intraday Macro EMA Length", minval=1, group=grp_ema)
+emaHtfP      = input.int(150, "Higher-TF Structural Baseline EMA (15m=50)", minval=1, group=grp_ema)
+
+grp_filt     = "3. Volatility Expansion, RSI & ADX Chop Filters"
+useSpread    = input.bool(true, "Require Candle Volatility Expansion Filter", group=grp_filt)
+spreadRatio  = input.float(1.10, "Candle Range vs 20-SMA Ratio", minval=0.5, step=0.05, group=grp_filt)
+rsiLen       = input.int(14, "RSI Length", minval=1, group=grp_filt)
+rsiBull      = input.float(52.0, "RSI Bull Minimum Threshold", minval=40.0, maxval=70.0, step=0.5, group=grp_filt)
+rsiBear      = input.float(48.0, "RSI Bear Maximum Threshold", minval=30.0, maxval=60.0, step=0.5, group=grp_filt)
+adxLen       = input.int(14, "ADX Length", minval=1, group=grp_filt)
+adxMin       = input.float(18.0, "Minimum ADX Trend Strength", minval=0.0, maxval=50.0, step=1.0, group=grp_filt)
+useLunchZone = input.bool(true, "Avoid Midday Lunch Chop Zone (11:30 - 13:00 IST)", group=grp_filt)
+
+grp_risk     = "4. Risk Management, Asymmetric Target & Ratchet"
+atrLen       = input.int(14, "ATR Stop Length", minval=1, group=grp_risk)
+slAtrMult    = input.float(2.0, "Stop Loss ATR Multiplier (Wick Shield)", minval=0.5, step=0.1, group=grp_risk)
+minFloorPts  = input.float(25.0, "Minimum Stop Loss Floor (Nifty Pts)", minval=10.0, step=1.0, group=grp_risk)
+beTriggerR   = input.float(1.5, "Stage-1 Breakeven Trigger (x Risk R)", minval=0.5, step=0.1, group=grp_risk)
+beLockR      = input.float(0.35, "Stage-1 Breakeven Lock Profit (+x R)", minval=0.0, step=0.05, group=grp_risk)
+targetR      = input.float(4.5, "Profit Target Multiple (x Risk R)", minval=1.0, step=0.5, group=grp_risk)
+useStTrail   = input.bool(true, "Enable Dynamic Supertrend Trailing Stop", group=grp_risk)
+intradayOnly = input.bool(true, "Strict Intraday MIS Mode (Auto-Exit 15:15 IST)", group=grp_risk)
+
+grp_vis      = "5. Visual Callout Engine & Telemetry HUD"
+showCallouts = input.bool(true, "Show BUY CALL / BUY PUT & EXIT Badges", group=grp_vis)
+displayLots  = input.int(1, "Display Qty (Lots)", minval=1, group=grp_vis)
+lotSize      = input.int(75, "Nifty Lot Size (Units/Lot)", minval=1, group=grp_vis)
+showRibbons  = input.bool(true, "Show EMA Trend Overlays", group=grp_vis)
+showStLine   = input.bool(true, "Show Supertrend Spine", group=grp_vis)
+showTradeLvls= input.bool(true, "Show Active Trade Entry / Stop / Target Lines", group=grp_vis)
+showHud      = input.bool(true, "Show Quant Studio Telemetry HUD Table", group=grp_vis)
+
+// ============================================================================
+// 2. MATHEMATICAL INDICATORS & VOLATILITY FILTERS
+// ============================================================================
+emaFast  = ta.ema(close, emaFastP)
+emaSlow  = ta.ema(close, emaSlowP)
+emaMacro = ta.ema(close, emaMacroP)
+emaHtf   = ta.ema(close, emaHtfP)
+rsiVal   = ta.rsi(close, rsiLen)
+
+trVal    = ta.tr(true)
+atrVal   = ta.rma(trVal, atrLen)
+curAtr   = math.max(nz(atrVal, minFloorPts), minFloorPts)
+
+// Range Spread Expansion Filter (filters dead midday chop candles)
+candleSpread = high - low
+spreadSma20  = ta.sma(candleSpread, 20)
+isSpreadExpanded = not useSpread or (candleSpread >= spreadSma20 * spreadRatio)
+
+// Wilder ADX 14 with Directional Movement
+upMove   = high - nz(high[1], high)
+dnMove   = nz(low[1], low) - low
+plusDm   = (upMove > dnMove and upMove > 0) ? upMove : 0.0
+minusDm  = (dnMove > upMove and dnMove > 0) ? dnMove : 0.0
+adxAtr   = nz(ta.rma(trVal, adxLen), 1.0)
+plusDi   = 100.0 * nz(ta.rma(plusDm, adxLen), 0.0) / math.max(adxAtr, 0.0001)
+minusDi  = 100.0 * nz(ta.rma(minusDm, adxLen), 0.0) / math.max(adxAtr, 0.0001)
+diSum    = plusDi + minusDi
+dxVal    = diSum > 0 ? (100.0 * math.abs(plusDi - minusDi) / diSum) : 0.0
+adxVal   = nz(ta.rma(dxVal, adxLen), 0.0)
+adxTrendOk = (adxMin <= 0.0) or (adxVal >= adxMin)
+
+// Exact Native Non-Repainting Supertrend
+stAtr      = ta.rma(trVal, stPeriod)
+hl2Val     = (high + low) / 2.0
+basicUpper = hl2Val + (stMult * nz(stAtr, 0.0))
+basicLower = hl2Val - (stMult * nz(stAtr, 0.0))
+
+var float upperBand = na
+var float lowerBand = na
+var int   stTrend   = 1
+var float stLine    = na
+
+if na(stAtr) or na(upperBand[1]) or bar_index <= stPeriod
+    upperBand := basicUpper
+    lowerBand := basicLower
+    stTrend   := 1
+    stLine    := basicLower
+else
+    upperBand := (basicUpper < upperBand[1] or close[1] > upperBand[1]) ? basicUpper : upperBand[1]
+    lowerBand := (basicLower > lowerBand[1] or close[1] < lowerBand[1]) ? basicLower : lowerBand[1]
+    if stTrend[1] == 1
+        stTrend := close < lowerBand ? -1 : 1
+    else
+        stTrend := close > upperBand ? 1 : -1
+    stLine := stTrend == 1 ? lowerBand : upperBand
+
+// Intraday Equal-Weighted VWAP (Safe for Nifty Spot)
+isNewDay = timeframe.change("D")
+var float cumHlc3 = 0.0
+var int   cumBars = 0
+if isNewDay or bar_index == 0
+    cumHlc3 := hlc3
+    cumBars := 1
+else
+    cumHlc3 += hlc3
+    cumBars += 1
+intradayVwap = cumHlc3 / math.max(cumBars, 1)
+
+// Robust IST Time Filter (No fragile session strings)
+istHour        = hour(time, "Asia/Kolkata")
+istMinute      = minute(time, "Asia/Kolkata")
+tInt           = istHour * 100 + istMinute
+
+isLunchZone    = useLunchZone and (tInt >= 1130 and tInt < 1300)
+inEntryWindow  = (not intradayOnly or (tInt >= 920 and tInt <= 1430)) and not isLunchZone
+isMisSquareoff = intradayOnly and (tInt >= 1515)
+
+// ============================================================================
+// 3. CONFLUENCE ENTRY & RATCHET POSITION ENGINE
+// ============================================================================
+var float entryPrice   = na
+var float initRisk     = na
+var float activeStop   = na
+var float activeTp     = na
+var int   ratchetStage = 0
+var int   legTrades    = 0
+
+if isNewDay
+    legTrades := 0
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flatNow = strategy.position_size == 0
+
+// Trade Management: Exits, Supertrend Trail & Ratchet
+if inLong
+    // Stage 1: Breakeven Lock at 1.5R
+    if beTriggerR > 0 and not na(entryPrice) and not na(initRisk) and high >= (entryPrice + initRisk * beTriggerR)
+        beStop = math.round((entryPrice + initRisk * beLockR) * 100.0) / 100.0
+        if na(activeStop) or beStop > activeStop
+            activeStop   := beStop
+            ratchetStage := 1
+
+    // Dynamic Supertrend Trailing Stop
+    if useStTrail and stTrend == 1 and not na(stLine) and (na(activeStop) or stLine > activeStop)
+        activeStop := math.round(stLine * 100.0) / 100.0
+
+    // Orders Execution
+    if not na(activeTp) and not na(activeStop)
+        strategy.exit("Long Exit", from_entry="Long", stop=activeStop, limit=activeTp)
+    else if not na(activeStop)
+        strategy.exit("Long Exit", from_entry="Long", stop=activeStop)
+
+    // Structural Reversal Exit & MIS Auto-Close
+    if isMisSquareoff
+        strategy.close("Long", comment="MIS Squareoff")
+    else if stTrend == -1 and emaFast < emaSlow
+        strategy.close("Long", comment="ST Flip Exit")
+
+if inShort
+    // Stage 1: Breakeven Lock at 1.5R
+    if beTriggerR > 0 and not na(entryPrice) and not na(initRisk) and low <= (entryPrice - initRisk * beTriggerR)
+        beStop = math.round((entryPrice - initRisk * beLockR) * 100.0) / 100.0
+        if na(activeStop) or beStop < activeStop
+            activeStop   := beStop
+            ratchetStage := 1
+
+    // Dynamic Supertrend Trailing Stop
+    if useStTrail and stTrend == -1 and not na(stLine) and (na(activeStop) or stLine < activeStop)
+        activeStop := math.round(stLine * 100.0) / 100.0
+
+    // Orders Execution
+    if not na(activeTp) and not na(activeStop)
+        strategy.exit("Short Exit", from_entry="Short", stop=activeStop, limit=activeTp)
+    else if not na(activeStop)
+        strategy.exit("Short Exit", from_entry="Short", stop=activeStop)
+
+    // Structural Reversal Exit & MIS Auto-Close
+    if isMisSquareoff
+        strategy.close("Short", comment="MIS Squareoff")
+    else if stTrend == 1 and emaFast > emaSlow
+        strategy.close("Short", comment="ST Flip Exit")
+
+// Entry Trigger Conditions
+bullAlign = stTrend == 1 and emaFast > emaSlow and close > emaMacro and close > emaHtf and close > intradayVwap and adxTrendOk and plusDi > minusDi
+bearAlign = stTrend == -1 and emaFast < emaSlow and close < emaMacro and close < emaHtf and close < intradayVwap and adxTrendOk and minusDi > plusDi
+
+rsiBullOk = rsiVal >= rsiBull
+rsiBearOk = rsiVal <= rsiBear
+
+freshBull = (stTrend[1] == -1) or (emaFast[1] <= emaSlow[1]) or (close > high[1])
+freshBear = (stTrend[1] == 1)  or (emaFast[1] >= emaSlow[1]) or (close < low[1])
+
+longCond  = bar_index >= 150 and inEntryWindow and (legTrades < 2) and bullAlign and isSpreadExpanded and rsiBullOk and freshBull
+shortCond = bar_index >= 150 and inEntryWindow and (legTrades < 2) and bearAlign and isSpreadExpanded and rsiBearOk and freshBear
+
+bool enteredLongBar  = false
+bool enteredShortBar = false
+
+if flatNow and not isMisSquareoff
+    if longCond
+        entryPrice     := close
+        rawRisk        = curAtr * slAtrMult
+        initRisk       := math.max(rawRisk, minFloorPts)
+        activeStop     := math.round((entryPrice - initRisk) * 100.0) / 100.0
+        activeTp       := targetR > 0 ? (math.round((entryPrice + initRisk * targetR) * 100.0) / 100.0) : na
+        ratchetStage   := 0
+        legTrades      += 1
+        enteredLongBar := true
+        strategy.entry("Long", strategy.long)
+    else if shortCond
+        entryPrice      := close
+        rawRisk         = curAtr * slAtrMult
+        initRisk        := math.max(rawRisk, minFloorPts)
+        activeStop      := math.round((entryPrice + initRisk) * 100.0) / 100.0
+        activeTp        := targetR > 0 ? (math.round((entryPrice - initRisk * targetR) * 100.0) / 100.0) : na
+        ratchetStage    := 0
+        legTrades       += 1
+        enteredShortBar := true
+        strategy.entry("Short", strategy.short)
+
+// ============================================================================
+// 4. IMAGE 2 VISUAL CALLOUT ENGINE (BUY CALL / BUY PUT & EXIT PnL BADGES)
+// ============================================================================
+closedCount = strategy.closedtrades
+prevClosed  = nz(closedCount[1], 0)
+
+if showCallouts and closedCount > prevClosed
+    for idx = prevClosed to closedCount - 1
+        exPrice  = strategy.closedtrades.exit_price(idx)
+        enPrice  = strategy.closedtrades.entry_price(idx)
+        trSize   = strategy.closedtrades.size(idx)
+        ptsDiff  = trSize > 0 ? (exPrice - enPrice) : (enPrice - exPrice)
+        isWin    = ptsDiff >= 0
+        signStr  = isWin ? "+" : ""
+        pillClr  = isWin ? #10b981 : #f43f5e
+        exitTxt  = "EXIT\n" + signStr + str.tostring(ptsDiff, "0.0") + " pts"
+        wasLong  = trSize > 0
+        yExitPos = wasLong ? (high + curAtr * 0.25) : (low - curAtr * 0.25)
+        lblStyle = wasLong ? label.style_label_down : label.style_label_up
+        label.new(bar_index, yExitPos, exitTxt, xloc=xloc.bar_index, yloc=yloc.price, color=pillClr, textcolor=color.white, style=lblStyle, size=size.small)
+
+if showCallouts and enteredLongBar
+    callTxt = "BUY CALL\nEntry: " + str.tostring(entryPrice, "0.00") + "\nQty: " + str.tostring(displayLots)
+    label.new(bar_index, low - curAtr * 0.35, callTxt, xloc=xloc.bar_index, yloc=yloc.price, color=#2563eb, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if showCallouts and enteredShortBar
+    putTxt  = "BUY PUT\nEntry: " + str.tostring(entryPrice, "0.00") + "\nQty: " + str.tostring(displayLots)
+    label.new(bar_index, high + curAtr * 0.35, putTxt, xloc=xloc.bar_index, yloc=yloc.price, color=#2563eb, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// Chart Overlays
+plot(showRibbons ? emaFast  : na, "Fast EMA (9)", color=color.new(#06b6d4, 40), linewidth=1)
+plot(showRibbons ? emaSlow  : na, "Slow EMA (21)", color=color.new(#f59e0b, 40), linewidth=1)
+plot(showRibbons ? emaMacro : na, "Macro EMA (50)", color=color.new(#818cf8, 45), linewidth=2)
+plot(showRibbons ? emaHtf   : na, "HTF Baseline (150)", color=color.new(#ec4899, 45), linewidth=2)
+plot(showRibbons ? intradayVwap : na, "Intraday VWAP", color=color.new(#e879f9, 50), linewidth=1, style=plot.style_circles)
+
+stColor = stTrend == 1 ? color.new(#10b981, 20) : color.new(#f43f5e, 20)
+plot(showStLine ? stLine : na, "Supertrend Spine", color=stColor, linewidth=2)
+
+// Active Trade Level Lines
+inTradeNow = strategy.position_size != 0
+plot(showTradeLvls and inTradeNow ? entryPrice : na, "Active Entry", color=color.new(#60a5fa, 20), linewidth=1, style=plot.style_linebr)
+plot(showTradeLvls and inTradeNow ? activeStop : na, "Active Stop / Trail", color=color.new(#fbbf24, 0), linewidth=2, style=plot.style_linebr)
+plot(showTradeLvls and inTradeNow and targetR > 0 ? activeTp : na, "Active Target", color=color.new(#10b981, 20), linewidth=1, style=plot.style_linebr)
+
+// ============================================================================
+// 5. QUANT STUDIO TELEMETRY HUD TABLE
+// ============================================================================
+var table hud = table.new(position.top_right, 2, 8, bgcolor=color.new(#0e121b, 8), border_color=color.new(#ffffff, 82), border_width=1)
+
+if barstate.islast and showHud
+    totTrades = strategy.closedtrades
+    wins      = strategy.wintrades
+    winRate   = totTrades > 0 ? (wins / totTrades) * 100.0 : 0.0
+    pf        = strategy.grossloss != 0 ? math.abs(strategy.grossprofit / strategy.grossloss) : 0.0
+    netInr    = strategy.netprofit
+    netPts    = netInr / math.max(lotSize, 1)
+    maxDdPts  = strategy.max_drawdown / math.max(lotSize, 1)
+
+    table.cell(hud, 0, 0, "👑 APEX MTF v3 [5M]", text_color=#60a5fa, text_size=size.small, bgcolor=color.new(#1e293b, 10), text_halign=text.align_left)
+    table.cell(hud, 1, 0, "CHAMPION #1", text_color=#34d399, text_size=size.tiny, bgcolor=color.new(#1e293b, 10), text_halign=text.align_right)
+
+    table.cell(hud, 0, 1, "Parameters", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 1, "ST(10,3.5) · EMA(9/21/50/150)", text_color=#e2e8f0, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 2, "Regime · ADX", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 2, (stTrend == 1 ? "BULL" : "BEAR") + " · ADX " + str.tostring(adxVal, "0.0"), text_color=(stTrend == 1 ? #10b981 : #f43f5e), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 3, "Net Profit (Points)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 3, (netPts >= 0 ? "+" : "") + str.tostring(netPts, "0.00") + " pts", text_color=(netPts >= 0 ? #10b981 : #f43f5e), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 4, "Net Profit (1 Lot INR)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 4, (netInr >= 0 ? "+INR " : "-INR ") + str.tostring(math.abs(netInr), "0"), text_color=(netInr >= 0 ? #10b981 : #f43f5e), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 5, "Win Rate (Trades)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 5, str.tostring(winRate, "0.0") + "% (" + str.tostring(totTrades) + ")", text_color=#f8fafc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 6, "Profit Factor", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 6, str.tostring(pf, "0.00"), text_color=(pf >= 1.35 ? #10b981 : #f8fafc), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 7, "Max Drawdown", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 7, "-" + str.tostring(maxDdPts, "0.00") + " pts", text_color=#f43f5e, text_size=size.tiny, text_halign=text.align_right)

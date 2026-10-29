@@ -1,0 +1,84 @@
+===============================================================================
+         HOW TO LAUNCH NSE QUANT STUDIO & TRADINGVIEW PINE TERMINAL
+===============================================================================
+
+This folder ("Trading Host") is 100% self-contained. It contains:
+- Complete historical NIFTY 50 dataset (52,107 5-minute candles from 2024 to 2026)
+- REAL-TIME LIVE MARKET SYNC: Automatically blends live intraday candles onto history!
+- LIVE FORWARD TESTER & PAPER TRADING: Simulated execution with dynamic P&L in ₹ & pts!
+- TradingView Lightweight Charts engine (runs offline, zero CDN needed)
+- Pine Script v5 Parser & Quantitative Backtesting Engine
+- Apex Trend-Momentum Symphony v2 Strategy
+- Built-in Indicator & Strategy Manager, Pine Editor, and Strategy Tester
+
+-------------------------------------------------------------------------------
+METHOD 1: THE EASIEST 1-CLICK LAUNCH (Recommended)
+-------------------------------------------------------------------------------
+1. Double-click "start_terminal.bat".
+2. A command window will appear showing server status.
+3. Your web browser will automatically open to:
+   http://localhost:8080/
+4. Enjoy trading, live forward-testing, editing Pine Script, and running backtests!
+
+* Note: Keep the command window open while using the terminal.
+  To stop the terminal, simply close that window or press Ctrl+C.
+
+
+-------------------------------------------------------------------------------
+LIVE MARKET SYNC & LIVE FORWARD TESTING
+-------------------------------------------------------------------------------
+- In the top header bar, you will see the "LIVE SYNC" indicator.
+  It streams live NSE prices and candle updates every few seconds.
+- In the bottom dock, click the "⚡ Live Forward Tester" tab:
+  1. View the live strategy signal (BUY / SELL / NEUTRAL) for Apex Symphony.
+  2. See dynamic calculated stop-loss and 2R profit targets.
+  3. Track paper trading executions, virtual capital (₹5,00,000 default),
+     and tick-by-tick unrealized P&L in real time!
+  4. Toggle "Auto-Trade Signals" to automatically execute simulated paper
+     orders whenever your Pine strategy triggers a signal.
+
+
+-------------------------------------------------------------------------------
+METHOD 2: LAUNCH FROM COMMAND PROMPT OR POWERSHELL
+-------------------------------------------------------------------------------
+1. Open Command Prompt or PowerShell in this folder.
+   (Tip: In Windows File Explorer, click the address bar, type 'cmd' and hit Enter)
+2. Type:
+   python server.py
+3. Open your browser and go to:
+   http://localhost:8080/
+
+
+-------------------------------------------------------------------------------
+METHOD 3: ACCESS FROM ANOTHER DEVICE (Phone, Tablet, Laptop) ON SAME WI-FI
+-------------------------------------------------------------------------------
+1. Launch the server using Method 1 or 2 on your main PC.
+2. Find your PC's local IP address:
+   - In Command Prompt, run: ipconfig
+   - Look for "IPv4 Address", for example: 192.168.1.15
+3. On your phone/tablet/laptop connected to the same Wi-Fi, open browser:
+   http://192.168.1.15:8080/
+
+
+-------------------------------------------------------------------------------
+HOW TO HOST THIS LIVE ON THE INTERNET (FREE & PAID OPTIONS)
+-------------------------------------------------------------------------------
+When you are ready to put this online so anyone can access it:
+
+OPTION A: Instant Live URL via Cloudflare Tunnel (Free & Instant, Zero Config)
+  1. Download cloudflared.
+  2. Run: cloudflared tunnel --url http://localhost:8080
+  3. You get a public HTTPS URL like: https://my-quant-terminal.trycloudflare.com
+
+OPTION B: Free Cloud Hosting on Render.com or Railway.app
+- Push this folder to a GitHub repository.
+- Connect your GitHub repo to Render.com (Web Service) or Railway.app.
+- Build Command: (leave empty, no pip dependencies needed!)
+- Start Command: python server.py --port $PORT
+
+OPTION C: Cheap Linux VPS (Hetzner / DigitalOcean / AWS Lightsail ~$4/mo)
+- Upload this folder to a VPS.
+- Run Docker:
+  docker build -t trading-terminal .
+  docker run -d -p 80:8080 trading-terminal
+===============================================================================

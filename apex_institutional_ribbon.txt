@@ -1,0 +1,234 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © NSE Quant Studio — #1 Apex Institutional Ribbon & Volatility Squeeze Engine v3 (5m Optimized)
+
+//@version=5
+strategy("Apex Institutional Ribbon & Volatility Squeeze v3 [NSE Quant Studio]", shorttitle="Apex Ribbon v3 [5m]", overlay=true, initial_capital=500000, default_qty_type=strategy.fixed, default_qty_value=75, currency=currency.INR, commission_type=strategy.commission.cash_per_order, commission_value=0.0, calc_on_every_tick=false, process_orders_on_close=true, max_labels_count=500, max_lines_count=500)
+
+// ============================================================================
+// 1. STRATEGY INPUTS & ARCHITECTURE
+// ============================================================================
+grp_ribbon   = "1. Institutional 4-EMA Ribbon"
+emaFastP     = input.int(8, "Fast EMA Length", minval=1, group=grp_ribbon)
+emaMedP      = input.int(21, "Transition EMA Length", minval=1, group=grp_ribbon)
+emaSlowP     = input.int(55, "Structural Support EMA Length", minval=1, group=grp_ribbon)
+emaMacroP    = input.int(200, "Macro Baseline Trend EMA Length", minval=1, group=grp_ribbon)
+
+grp_vol      = "2. Volatility Spread & Money Flow Filters"
+spreadMultIn = input.float(1.2, "Minimum Candle Range (x ATR 14)", minval=0.5, step=0.05, group=grp_vol)
+cmfThreshIn  = input.float(0.08, "Chaikin Money Flow Threshold", minval=0.0, step=0.01, group=grp_vol)
+adxThreshIn  = input.float(20.0, "Minimum ADX Trend Strength", minval=0.0, step=1.0, group=grp_vol)
+
+grp_risk     = "3. Asymmetric Risk, Target & Ratchet"
+slAtrMultIn  = input.float(1.5, "Stop Loss Buffer (x ATR below EMA 55)", minval=0.5, step=0.1, group=grp_risk)
+targetRIn    = input.float(3.5, "Profit Target Multiple (x R)", minval=1.0, step=0.1, group=grp_risk)
+beTriggerRIn = input.float(1.2, "Stage-1 Breakeven Trigger (x R)", minval=0.5, step=0.1, group=grp_risk)
+beLockRIn    = input.float(0.2, "Stage-1 Breakeven Lock (+x R)", minval=0.0, step=0.05, group=grp_risk)
+exitEma21    = input.bool(true, "Exit on EMA 21 Structural Close", group=grp_risk)
+intradayOnly = input.bool(true, "Strict Intraday MIS Mode (Flat at 15:15 IST)", group=grp_risk)
+
+grp_vis      = "4. Visual Callouts & Telemetry HUD"
+showCallouts = input.bool(true, "Show BUY CALL / BUY PUT & EXIT Badges", group=grp_vis)
+displayLots  = input.int(1, "Display Qty (Lots)", minval=1, group=grp_vis)
+lotSize      = input.int(75, "Nifty Lot Size (Units/Lot)", minval=1, group=grp_vis)
+showRibbons  = input.bool(true, "Show 4-EMA Ribbon Lines", group=grp_vis)
+showTradeLvls= input.bool(true, "Show Entry / Stop / Target Lines", group=grp_vis)
+showHud      = input.bool(true, "Show Quant Studio Telemetry HUD Table", group=grp_vis)
+
+// ============================================================================
+// 2. CORE MATHEMATICAL INDICATORS
+// ============================================================================
+emaFast  = ta.ema(close, emaFastP)
+emaMed   = ta.ema(close, emaMedP)
+emaSlow  = ta.ema(close, emaSlowP)
+emaMacro = ta.ema(close, emaMacroP)
+
+trVal    = ta.tr(true)
+atr14    = ta.rma(trVal, 14)
+curAtr   = math.max(nz(atr14, 15.0), 15.0)
+
+// Normalized Candle Range Spread (filters low-volume consolidation noise)
+candleRange  = high - low
+spreadFilter = candleRange >= (curAtr * spreadMultIn)
+
+// Chaikin Money Flow (Equal-Weighted Index Adapted)
+mfMultiplier = ((close - low) - (high - close)) / math.max(high - low, 0.001)
+cmfVal       = ta.sma(mfMultiplier, 20)
+
+// Wilder's ADX 14
+upMove  = high - nz(high[1], high)
+dnMove  = nz(low[1], low) - low
+plusDm  = (upMove > dnMove and upMove > 0) ? upMove : 0.0
+minusDm = (dnMove > upMove and dnMove > 0) ? dnMove : 0.0
+adxAtr  = nz(ta.rma(trVal, 14), 1.0)
+plusDi  = 100.0 * nz(ta.rma(plusDm, 14), 0.0) / math.max(adxAtr, 0.0001)
+minusDi = 100.0 * nz(ta.rma(minusDm, 14), 0.0) / math.max(adxAtr, 0.0001)
+diSum   = plusDi + minusDi
+dxVal   = diSum > 0 ? (100.0 * math.abs(plusDi - minusDi) / diSum) : 0.0
+adxVal  = nz(ta.rma(dxVal, 14), 0.0)
+
+// IST Session Helper
+istHour        = hour(time, "Asia/Kolkata")
+istMinute      = minute(time, "Asia/Kolkata")
+tInt           = istHour * 100 + istMinute
+inEntryWindow  = (not intradayOnly) or (tInt >= 920 and tInt <= 1430)
+isMisSquareoff = intradayOnly and (tInt >= 1515)
+
+// ============================================================================
+// 3. INSTITUTIONAL RIBBON CONFLUENCE CONDITIONS
+// ============================================================================
+// Perfect Ribbon Stack
+bullRibbon = (emaFast > emaMed) and (emaMed > emaSlow) and (close > emaMacro)
+bearRibbon = (emaFast < emaMed) and (emaMed < emaSlow) and (close < emaMacro)
+
+// Momentum impulse trigger: price breaks out with range spread expansion and money flow
+longCond  = inEntryWindow and bullRibbon and spreadFilter and (cmfVal >= cmfThreshIn) and (adxVal >= adxThreshIn) and (close > emaFast)
+shortCond = inEntryWindow and bearRibbon and spreadFilter and (cmfVal <= -cmfThreshIn) and (adxVal >= adxThreshIn) and (close < emaFast)
+
+// ============================================================================
+// 4. POSITION MANAGEMENT & DYNAMIC RATCHET EXITS
+// ============================================================================
+var float entryPrice   = na
+var float initRisk     = na
+var float activeStop   = na
+var float activeTp     = na
+var int   ratchetStage = 0
+
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flatNow = strategy.position_size == 0
+
+// Trade Management: Ratchet Stop & Target
+if inLong
+    if beTriggerRIn > 0 and not na(entryPrice) and not na(initRisk) and high >= (entryPrice + initRisk * beTriggerRIn)
+        beStop = math.round((entryPrice + initRisk * beLockRIn) * 100.0) / 100.0
+        if na(activeStop) or beStop > activeStop
+            activeStop   := beStop
+            ratchetStage := 1
+
+    if not na(activeTp) and not na(activeStop)
+        strategy.exit("Long Exit", from_entry="Long", stop=activeStop, limit=activeTp)
+    else if not na(activeStop)
+        strategy.exit("Long Exit", from_entry="Long", stop=activeStop)
+
+    if isMisSquareoff
+        strategy.close("Long", comment="MIS Exit")
+    else if exitEma21 and close < emaMed
+        strategy.close("Long", comment="EMA21 Trail Exit")
+
+if inShort
+    if beTriggerRIn > 0 and not na(entryPrice) and not na(initRisk) and low <= (entryPrice - initRisk * beTriggerRIn)
+        beStop = math.round((entryPrice - initRisk * beLockRIn) * 100.0) / 100.0
+        if na(activeStop) or beStop < activeStop
+            activeStop   := beStop
+            ratchetStage := 1
+
+    if not na(activeTp) and not na(activeStop)
+        strategy.exit("Short Exit", from_entry="Short", stop=activeStop, limit=activeTp)
+    else if not na(activeStop)
+        strategy.exit("Short Exit", from_entry="Short", stop=activeStop)
+
+    if isMisSquareoff
+        strategy.close("Short", comment="MIS Exit")
+    else if exitEma21 and close > emaMed
+        strategy.close("Short", comment="EMA21 Trail Exit")
+
+bool enteredLong  = false
+bool enteredShort = false
+
+// Entry Execution
+if flatNow and not isMisSquareoff
+    if longCond
+        entryPrice   := close
+        rawRisk      = math.max(close - emaSlow + (curAtr * (slAtrMultIn - 1.0)), curAtr * 1.2)
+        initRisk     := math.min(math.max(rawRisk, 15.0), 85.0)
+        activeStop   := math.round((entryPrice - initRisk) * 100.0) / 100.0
+        activeTp     := math.round((entryPrice + initRisk * targetRIn) * 100.0) / 100.0
+        ratchetStage := 0
+        enteredLong  := true
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", from_entry="Long", stop=activeStop, limit=activeTp)
+    else if shortCond
+        entryPrice   := close
+        rawRisk      = math.max(emaSlow - close + (curAtr * (slAtrMultIn - 1.0)), curAtr * 1.2)
+        initRisk     := math.min(math.max(rawRisk, 15.0), 85.0)
+        activeStop   := math.round((entryPrice + initRisk) * 100.0) / 100.0
+        activeTp     := math.round((entryPrice - initRisk * targetRIn) * 100.0) / 100.0
+        ratchetStage := 0
+        enteredShort := true
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", from_entry="Short", stop=activeStop, limit=activeTp)
+
+// ============================================================================
+// 5. VISUAL CALLOUT ENGINE & OVERLAYS
+// ============================================================================
+closedCount = strategy.closedtrades
+prevClosed  = nz(closedCount[1], 0)
+
+if showCallouts and closedCount > prevClosed
+    for idx = prevClosed to closedCount - 1
+        exPrice  = strategy.closedtrades.exit_price(idx)
+        enPrice  = strategy.closedtrades.entry_price(idx)
+        trSize   = strategy.closedtrades.size(idx)
+        ptsDiff  = trSize > 0 ? (exPrice - enPrice) : (enPrice - exPrice)
+        isWin    = ptsDiff >= 0
+        signStr  = isWin ? "+" : ""
+        pillClr  = isWin ? #10b981 : #f43f5e
+        exitTxt  = "EXIT\n" + signStr + str.tostring(ptsDiff, "0.0") + " pts"
+        wasLong  = trSize > 0
+        yExitPos = wasLong ? (high + curAtr * 0.25) : (low - curAtr * 0.25)
+        lblStyle = wasLong ? label.style_label_down : label.style_label_up
+        label.new(bar_index, yExitPos, exitTxt, xloc=xloc.bar_index, yloc=yloc.price, color=pillClr, textcolor=color.white, style=lblStyle, size=size.small)
+
+if showCallouts and enteredLong
+    label.new(bar_index, low - curAtr * 0.35, "BUY CALL\nEntry: " + str.tostring(entryPrice, "0.00") + "\nQty: " + str.tostring(displayLots), xloc=xloc.bar_index, yloc=yloc.price, color=#2563eb, textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if showCallouts and enteredShort
+    label.new(bar_index, high + curAtr * 0.35, "BUY PUT\nEntry: " + str.tostring(entryPrice, "0.00") + "\nQty: " + str.tostring(displayLots), xloc=xloc.bar_index, yloc=yloc.price, color=#2563eb, textcolor=color.white, style=label.style_label_down, size=size.small)
+
+plot(showRibbons ? emaFast  : na, "Fast EMA (8)", color=color.new(#06b6d4, 30), linewidth=1)
+plot(showRibbons ? emaMed   : na, "Med EMA (21)", color=color.new(#f59e0b, 30), linewidth=1)
+plot(showRibbons ? emaSlow  : na, "Slow EMA (55)", color=color.new(#818cf8, 30), linewidth=2)
+plot(showRibbons ? emaMacro : na, "Macro EMA (200)", color=color.new(#ec4899, 40), linewidth=2)
+
+inTradeNow = strategy.position_size != 0
+plot(showTradeLvls and inTradeNow ? entryPrice : na, "Active Entry", color=color.new(#60a5fa, 20), linewidth=1, style=plot.style_linebr)
+plot(showTradeLvls and inTradeNow ? activeStop : na, "Active Ratchet Stop", color=color.new(#fbbf24, 0), linewidth=2, style=plot.style_linebr)
+plot(showTradeLvls and inTradeNow ? activeTp   : na, "Active 3.5R Target", color=color.new(#10b981, 20), linewidth=1, style=plot.style_linebr)
+
+// ============================================================================
+// 6. QUANT STUDIO TELEMETRY HUD TABLE
+// ============================================================================
+var table hud = table.new(position.top_right, 2, 8, bgcolor=color.new(#0e121b, 8), border_color=color.new(#ffffff, 82), border_width=1)
+
+if barstate.islast and showHud
+    totTrades = strategy.closedtrades
+    wins      = strategy.wintrades
+    winRate   = totTrades > 0 ? (wins / totTrades) * 100.0 : 0.0
+    pf        = strategy.grossloss != 0 ? math.abs(strategy.grossprofit / strategy.grossloss) : 0.0
+    netInr    = strategy.netprofit
+    netPts    = netInr / math.max(lotSize, 1)
+    maxDdPts  = strategy.max_drawdown / math.max(lotSize, 1)
+
+    table.cell(hud, 0, 0, "👑 APEX RIBBON v3 [5M]", text_color=#60a5fa, text_size=size.small, bgcolor=color.new(#1e293b, 10), text_halign=text.align_left)
+    table.cell(hud, 1, 0, "INSTITUTIONAL", text_color=#34d399, text_size=size.tiny, bgcolor=color.new(#1e293b, 10), text_halign=text.align_right)
+
+    table.cell(hud, 0, 1, "Ribbon Status", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 1, bullRibbon ? "BULL STACK (8>21>55)" : bearRibbon ? "BEAR STACK (8<21<55)" : "TRANSITION / CHOP", text_color=bullRibbon ? #10b981 : bearRibbon ? #f43f5e : #e2e8f0, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 2, "CMF · ADX Strength", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 2, "CMF: " + str.tostring(cmfVal, "0.00") + " · ADX: " + str.tostring(adxVal, "0.0"), text_color=#f8fafc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 3, "Net Profit (Points)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 3, (netPts >= 0 ? "+" : "") + str.tostring(netPts, "0.00") + " pts", text_color=(netPts >= 0 ? #10b981 : #f43f5e), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 4, "Net Profit (1 Lot INR)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 4, (netInr >= 0 ? "+INR " : "-INR ") + str.tostring(math.abs(netInr), "0"), text_color=(netInr >= 0 ? #10b981 : #f43f5e), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 5, "Win Rate (Trades)", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 5, str.tostring(winRate, "0.0") + "% (" + str.tostring(totTrades) + ")", text_color=#f8fafc, text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 6, "Profit Factor", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 6, str.tostring(pf, "0.00"), text_color=(pf >= 1.35 ? #10b981 : #f8fafc), text_size=size.tiny, text_halign=text.align_right)
+
+    table.cell(hud, 0, 7, "Max Drawdown", text_color=#94a3b8, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(hud, 1, 7, "-" + str.tostring(maxDdPts, "0.00") + " pts", text_color=#f43f5e, text_size=size.tiny, text_halign=text.align_right)
