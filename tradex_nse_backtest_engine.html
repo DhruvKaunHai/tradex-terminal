@@ -2110,7 +2110,8 @@
       </button>
 
       <select class="bento-select" id="strat-select" style="max-width:280px;">
-        <option value="apex_symphony_v2" selected>APEX NEW (Auto 5m/15m)</option>
+        <option value="apex_ultimate_5m_champion" selected>Apex Ultimate Symphony [5m Champion]</option>
+        <option value="apex_symphony_v2">APEX NEW (Auto 5m/15m)</option>
         <option value="apex_institutional_ribbon">Apex Institutional 4-EMA Ribbon (5m)</option>
         <option value="apex_trend_symphony">Apex Symphony v1 (Classic)</option>
         <option value="quantum_orb_momentum">15m ORB + Trend Filter (MIS)</option>
@@ -3736,7 +3737,72 @@ let DECODED_5M_CANDLES = null;
         return byDay;
       }
 
-      if (strategyType === "apex_symphony_v2" || strategyType === "apex_trend_symphony") {
+      if (strategyType === "apex_ultimate_5m_champion") {
+        const [stLine, stTrend] = jsCalcSupertrend(candles, 10, 3.0);
+        const e8 = jsCalcEma(closes, 8);
+        const e21 = jsCalcEma(closes, 21);
+        const e55 = jsCalcEma(closes, 55);
+        const vwapVal = jsCalcIntradayVwap(candles);
+        const atrVal = jsCalcAtr(candles, 14);
+
+        let inPos = false, posSide = null, entryC = null, entryP = 0, entryIdx = 0, sl = 0, initRisk = 0;
+        for (let i = 55; i < n; i++) {
+          const c = candles[i];
+          const info = getIstInfo(c.time);
+          const tInt = info.tInt;
+
+          if (inPos) {
+            const barsHeld = i - entryIdx;
+            if (tInt >= 1515) {
+              const pnl = Math.round(((posSide === "BUY" ? (c.close - entryP) : (entryP - c.close))) * 100) / 100;
+              trades.push({ entry_time: entryC.time, entry_price: entryP, exit_time: c.time, exit_price: c.close, pnl, pnl_pct: Math.round((pnl / entryP) * 10000) / 100, reason: "MIS_SQUAREOFF", side: posSide, bars_held: barsHeld });
+              inPos = false;
+              continue;
+            }
+
+            if (posSide === "BUY") {
+              if (c.high >= entryP + initRisk * 1.0) sl = Math.max(sl, Math.round((entryP + initRisk * 0.25) * 100) / 100);
+              if (c.high >= entryP + initRisk * 2.0) sl = Math.max(sl, Math.round((entryP + initRisk * 1.25) * 100) / 100);
+              if (stTrend[i] === 1 && stLine[i] > sl) sl = Math.round(stLine[i] * 100) / 100;
+
+              if (c.low <= sl || stTrend[i] === -1) {
+                const exitP = Math.max(c.close, sl);
+                const pnl = Math.round((exitP - entryP) * 100) / 100;
+                trades.push({ entry_time: entryC.time, entry_price: entryP, exit_time: c.time, exit_price: exitP, pnl, pnl_pct: Math.round((pnl / entryP) * 10000) / 100, reason: sl > entryP ? "RATCHET_LOCK" : "STOP_LOSS", side: "BUY", bars_held: barsHeld });
+                inPos = false;
+              }
+            } else {
+              if (c.low <= entryP - initRisk * 1.0) sl = Math.min(sl, Math.round((entryP - initRisk * 0.25) * 100) / 100);
+              if (c.low <= entryP - initRisk * 2.0) sl = Math.min(sl, Math.round((entryP - initRisk * 1.25) * 100) / 100);
+              if (stTrend[i] === -1 && stLine[i] < sl) sl = Math.round(stLine[i] * 100) / 100;
+
+              if (c.high >= sl || stTrend[i] === 1) {
+                const exitP = Math.min(c.close, sl);
+                const pnl = Math.round((entryP - exitP) * 100) / 100;
+                trades.push({ entry_time: entryC.time, entry_price: entryP, exit_time: c.time, exit_price: exitP, pnl, pnl_pct: Math.round((pnl / entryP) * 10000) / 100, reason: sl < entryP ? "RATCHET_LOCK" : "STOP_LOSS", side: "SELL", bars_held: barsHeld });
+                inPos = false;
+              }
+            }
+          }
+
+          if (!inPos) {
+            if (!(tInt >= 920 && tInt <= 1430)) continue;
+
+            const isBull = stTrend[i] === 1 && c.close > vwapVal[i] && e8[i] > e21[i] && (stTrend[i - 1] !== 1 || e8[i - 1] <= e21[i - 1]);
+            const isBear = stTrend[i] === -1 && c.close < vwapVal[i] && e8[i] < e21[i] && (stTrend[i - 1] !== -1 || e8[i - 1] >= e21[i - 1]);
+
+            if (isBull) {
+              inPos = true; posSide = "BUY"; entryC = c; entryP = c.close; entryIdx = i;
+              sl = Math.round(stLine[i] * 100) / 100;
+              initRisk = Math.max(entryP - sl, 15.0);
+            } else if (isBear) {
+              inPos = true; posSide = "SELL"; entryC = c; entryP = c.close; entryIdx = i;
+              sl = Math.round(stLine[i] * 100) / 100;
+              initRisk = Math.max(sl - entryP, 15.0);
+            }
+          }
+        }
+      } else if (strategyType === "apex_symphony_v2" || strategyType === "apex_trend_symphony") {
         const v2Mode = String(params.apex_v2_mode ?? "v2_auto");
         const is5m = currentTimeframe === "5m";
         const useV2_5m = (v2Mode === "v2_auto" && is5m) || (v2Mode === "v2_5m");
@@ -4696,6 +4762,7 @@ let DECODED_5M_CANDLES = null;
       });
 
       const metaMap = {
+        apex_ultimate_5m_champion: { name: "Apex Ultimate Symphony [5m Champion]", rules: "Supertrend (10, 3.0) + EMA Ribbon (8/21/55) + VWAP Anchor + 2-Stage Dynamic Ratchet Stop (+1.0R BE, +2.0R Lock, ST Trail)", stop: "Structural ST Line + Dynamic Ratchet Lock (+0.25R / +1.25R)", target: "Convex Trend Runner + Live Supertrend Trailing", squareoff: "MIS 15:15 IST Mandatory Square-Off", overlay_type: "supertrend_ribbon" },
         apex_symphony_v2: { name: "APEX NEW (Trend-Momentum Symphony)", rules: "Supertrend (14/3.5 on 5m, 10/3.0 on 15m) + 3-EMA Ribbon + VWAP + RSI Momentum + ADX Chop Filter + 2-Stage Ratchet", stop: "Stop Loss: 1.8x ATR (5m) / 1.6x ATR (15m) + Stage-1 BE + Stage-2 Lock", target: "Profit Target: 3.5R (5m) / 4.5R (15m) + Live ST Trailing", squareoff: "MIS 15:15 IST (Optional) / Trend Reversal", overlay_type: "supertrend_ribbon" },
         apex_institutional_ribbon: { name: "Apex Institutional 4-EMA Ribbon & Volatility Squeeze (5m)", rules: "4-EMA Ribbon (8/21/55/200) Alignment & Expansion + Volatility Spread Spike + Chaikin Money Flow + ADX (14) >= 20", stop: "Stop Loss: 1.5x ATR below EMA 55 (12-80 pts) + 1.2R BE Activation", target: "Profit Target: 3.5R Multiple + EMA 21 Structural Trail", squareoff: "MIS Auto-Exit: 15:15 IST", overlay_type: "ribbon_4ema" },
         apex_trend_symphony: { name: "Multi-Factor Trend (ST + EMA + VWAP + RSI)", rules: "Supertrend (10,3) + EMA Ribbon (9/21/50) + Intraday VWAP + RSI (14) Impulse; trails via Breakeven Ratchet & Supertrend", stop: `Stop Loss: ${params.apex_sl_atr ?? 1.5}x ATR + ${params.apex_be_r ?? 1.2}R Ratchet`, target: "Live Supertrend Trail & Opposite Symphony Reversal", squareoff: "MIS 15:15 IST (Optional) / Trend-Hold", overlay_type: "ema" },
